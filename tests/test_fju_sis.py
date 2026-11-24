@@ -245,5 +245,129 @@ class CliAndMcpTests(unittest.TestCase):
             self.assertEqual(len(body["files"]), 1)
 
 
+class ExtendedFeaturesTests(unittest.TestCase):
+    def _session(self):
+        tok = make_jwt({"exp": int(time.time()) + 3600})
+        return MemoryStore(Session(emp_no="411000001", auth_token=tok, exp=int(time.time()) + 3600))
+
+    def test_enrollment_cert_download_defaults_to_current_semester(self):
+        seen = []
+
+        def transport(method, url, headers, body, timeout):
+            seen.append(url)
+            if "GetStuInfo" in url:
+                return HttpResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps({
+                        "statusCode": 200,
+                        "result": {
+                            "hisStuStatusInfo": [
+                                {"hy": 114, "ht": 1, "isReg": True, "isCurrent": False},
+                                {"hy": 114, "ht": 2, "isReg": True, "isCurrent": True},
+                            ]
+                        },
+                    }).encode(),
+                )
+            if "OnlineStuStatusCertApply/Download" in url:
+                return HttpResponse(200, {"content-type": "application/pdf"}, b"%PDF-1.7\ncert")
+            raise AssertionError(url)
+
+        client = SisClient(store=self._session(), transport=transport)
+        with tempfile.TemporaryDirectory() as tmp:
+            res = client.download_enrollment_cert(tmp, lang="en")
+            self.assertEqual(res["hy"], 114)
+            self.assertEqual(res["ht"], 2)
+            self.assertEqual(res["lang"], "en")
+            self.assertTrue(Path(res["path"]).is_file())
+            self.assertIn("version=2", seen[-1])
+            self.assertIn("stuNO=411000001", seen[-1])
+
+    def test_registration_and_course_search(self):
+        seen = []
+
+        def transport(method, url, headers, body, timeout):
+            seen.append(url)
+            if "/Register/api/NotFile/Info" in url:
+                return HttpResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps({"statusCode": 200, "result": {"hy": 114, "ht": 2, "registerStatus": 1, "errorFields": []}}).encode(),
+                )
+            if "CourseStudentQueryByBasics" in url:
+                return HttpResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps({"statusCode": 200, "result": {"totalItemCount": 1, "result": [{"couCNa": "相對論", "tchCNa": "王老師"}]}}).encode(),
+                )
+            if "CourseStudentQueryByGDPT" in url:
+                return HttpResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps({"statusCode": 200, "result": {"totalItemCount": 1, "result": [{"couCNa": "人文通識"}]}}).encode(),
+                )
+            raise AssertionError(url)
+
+        client = SisClient(store=self._session(), transport=transport)
+        reg = client.get_registration_status()
+        self.assertEqual(reg["registerStatus"], 1)
+        c1 = client.search_courses(hy=114, ht=2, keyword="相對論")
+        self.assertEqual(c1["result"][0]["couCNa"], "相對論")
+        c2 = client.search_courses(hy=114, ht=2, general_edu=True)
+        self.assertEqual(c2["result"][0]["couCNa"], "人文通識")
+
+    def test_leave_draft_never_calls_confirm_and_uploads_attachment(self):
+        calls = []
+
+        def transport(method, url, headers, body, timeout):
+            calls.append((method, url))
+            if "/RefList/RefLeave" in url:
+                return HttpResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps({"statusCode": 200, "result": [{"refLeaveSn": 3, "leaveCna": "病假", "docList": [{"refDocSn": 9}]}]}).encode(),
+                )
+            if "/Course/Section" in url:
+                return HttpResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps({"statusCode": 200, "result": [{"sectNo": 1, "sectionNo": "D1", "sectionCna": "第1節"}, {"sectNo": 2, "sectionNo": "D2", "sectionCna": "第2節"}]}).encode(),
+                )
+            if "/Student/Contact" in url:
+                return HttpResponse(200, {"content-type": "application/json"}, b'{"statusCode":200,"result":{"phoneNumber":"0900000000","emailAccount":"a@example.com"}}')
+            if method == "POST" and url.endswith("/StuLeave"):
+                self.assertIn(b"UploadFiles[0].uploadFile", body)
+                return HttpResponse(200, {"content-type": "application/json"}, b'{"statusCode":200,"result":{"leaveApplySn":999}}')
+            if method == "GET" and url.endswith("/StuLeave/999/SelCou"):
+                return HttpResponse(200, {"content-type": "application/json"}, b'{"statusCode":200,"result":[{"jonCouSn":1,"tchNo":123}]}')
+            if method == "POST" and url.endswith("/StuLeave/999/SelCou"):
+                return HttpResponse(200, {"content-type": "application/json"}, b'{"statusCode":200,"result":true}')
+            if url.endswith("/StuLeave/999/LeaveAlert"):
+                return HttpResponse(200, {"content-type": "application/json"}, b'{"statusCode":200,"result":[]}')
+            raise AssertionError(f"Unexpected call: {method} {url}")
+
+        client = SisClient(store=self._session(), transport=transport)
+        with tempfile.TemporaryDirectory() as tmp:
+            proof = Path(tmp) / "receipt.jpg"
+            proof.write_bytes(b"\xff\xd8\xff\xe0fakejpg")
+            res = client.create_leave_draft(
+                hy=114,
+                ht=2,
+                leave_type="病假",
+                begin_date="2026-11-25",
+                end_date="2026-11-25",
+                begin_section="D1",
+                end_section="D2",
+                reason="發燒看診",
+                attachments=[proof],
+            )
+            self.assertEqual(res["leaveApplySn"], 999)
+            self.assertFalse(res["submitted"])
+            self.assertTrue(res["draft_only"])
+            self.assertEqual(res["selected_courses"], 1)
+            self.assertEqual(res["attachments"], 1)
+            self.assertFalse(any("/Confirm" in u for _, u in calls))
+
+
 if __name__ == "__main__":
     unittest.main()
