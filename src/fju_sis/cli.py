@@ -60,6 +60,16 @@ def cmd_whoami(args: argparse.Namespace, client: SisClient) -> int:
     return 0
 
 
+def cmd_keepalive(args: argparse.Namespace, client: SisClient) -> int:
+    session = client.keepalive()
+    if args.json:
+        _print_json({"ok": True, "emp_no": session.emp_no, "exp": session.exp})
+        return 0
+    if not args.quiet:
+        print(f"已續期！學號：{session.emp_no}，新到期：{_fmt_exp(session.exp)}")
+    return 0
+
+
 def cmd_grades(args: argparse.Namespace, client: SisClient) -> int:
     grades = client.get_grades(hy=args.hy, ht=args.ht)
     if args.json:
@@ -281,6 +291,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_who = sub.add_parser("whoami", help="檢查目前登入狀態")
     p_who.add_argument("--json", action="store_true")
 
+    p_keep = sub.add_parser("keepalive", help="主動續期權杖並回寫系統認證管理員（適合排程定期執行）")
+    p_keep.add_argument("--quiet", action="store_true")
+    p_keep.add_argument("--json", action="store_true")
+
     p_grades = sub.add_parser("grades", help="查詢歷年或指定學期各科成績")
     p_grades.add_argument("--hy", type=int, help="學年度（例如 114）")
     p_grades.add_argument("--ht", type=int, help="學期（例如 1 或 2）")
@@ -383,6 +397,8 @@ def main(argv: list[str] | None = None, *, client: SisClient | None = None) -> i
             return cmd_logout(args, sis)
         if args.command == "whoami":
             return cmd_whoami(args, sis)
+        if args.command == "keepalive":
+            return cmd_keepalive(args, sis)
         if args.command == "grades":
             return cmd_grades(args, sis)
         if args.command == "ranks":

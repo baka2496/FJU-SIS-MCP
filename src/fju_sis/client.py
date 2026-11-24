@@ -7,6 +7,7 @@ import json
 import mimetypes
 from pathlib import Path
 import re
+import ssl
 from typing import Any, Callable
 import urllib.error
 import urllib.parse
@@ -49,6 +50,15 @@ def current_academic_semester(now: datetime | None = None) -> tuple[int, int]:
     return dt.year - 1912, (1 if dt.month == 1 else 2)
 
 
+def _ssl_context() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    # Python 3.13+ enables VERIFY_X509_STRICT, which rejects FJU's intermediate cert
+    # ("Missing Subject Key Identifier") even though chain + hostname verification succeed.
+    if hasattr(ssl, "VERIFY_X509_STRICT"):
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    return ctx
+
+
 def default_transport(
     method: str,
     url: str,
@@ -58,7 +68,7 @@ def default_transport(
 ) -> HttpResponse:
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
             hdrs = {k.lower(): v for k, v in resp.headers.items()}
             return HttpResponse(status=resp.status, headers=hdrs, body=resp.read())
     except urllib.error.HTTPError as exc:
@@ -189,13 +199,10 @@ class SisClient:
             raise AuthError("登入已過期，且沒有可用的續期權杖；請執行 fjusis login 重新登入。")
         query = urllib.parse.urlencode({"refreshToken": session.refresh_token, "empNo": session.emp_no})
         url = f"{self.base_url}/FjuBase/api/Account/RefreshToken?{query}"
-        resp = self._transport(
-            "POST",
-            url,
-            {"Accept": "application/json", "Content-Length": "0"},
-            b"",
-            self.timeout,
-        )
+        headers = {"Accept": "application/json", "Content-Length": "0"}
+        if session.auth_token:
+            headers["Authorization"] = f"Bearer {session.auth_token}"
+        resp = self._transport("POST", url, headers, b"", self.timeout)
         data = _parse_json(resp.body) if resp.body else {}
         if resp.status >= 400 or not isinstance(data, dict):
             raise AuthError(_extract_error(data, "登入已過期，請執行 fjusis login 重新登入。"))
@@ -297,6 +304,12 @@ class SisClient:
             "exp": session.exp,
             "student_info": info,
         }
+
+    def keepalive(self) -> Session:
+        session = self._session or self.store.load()
+        if not session or not session.auth_token:
+            raise AuthError("尚未登入輔大學生資訊平台；請在終端機執行 fjusis login。")
+        return self.refresh_session(session)
 
     def get_grades(
         self,

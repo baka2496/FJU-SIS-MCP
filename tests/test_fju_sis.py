@@ -104,6 +104,7 @@ class ClientTests(unittest.TestCase):
         def transport(method, url, headers, body, timeout):
             calls.append((method, url, headers.get("Authorization")))
             if "/RefreshToken" in url:
+                self.assertEqual(headers.get("Authorization"), f"Bearer {old_tok}")
                 return HttpResponse(
                     200,
                     {"content-type": "application/json"},
