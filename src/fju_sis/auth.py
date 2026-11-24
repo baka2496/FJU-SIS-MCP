@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 DEFAULT_TARGET = "FJU-SIS-MCP/session"
+DEFAULT_CRED_TARGET = "FJU-SIS-MCP/credentials"
 _CRED_TYPE_GENERIC = 1
 _CRED_PERSIST_LOCAL_MACHINE = 2
 
@@ -177,6 +178,74 @@ class SessionStore:
                 return True
             err = ctypes.get_last_error()
             if err == 1168:  # ERROR_NOT_FOUND
+                return False
+            raise OSError(f"Windows Credential Manager delete failed (error {err})")
+        if self.posix_path.is_file():
+            self.posix_path.unlink()
+            return True
+        return False
+
+
+class CredentialStore:
+    """Optional OS-encrypted credential storage for automatic re-login after sleep/expiry."""
+
+    def __init__(self, target: str = DEFAULT_CRED_TARGET, posix_path: Path | None = None):
+        self.target = target
+        self.posix_path = posix_path or (Path.home() / ".config" / "fju-sis" / "credentials.json")
+
+    def save(self, emp_no: str, password: str) -> None:
+        raw = json.dumps({"emp_no": emp_no.strip(), "password": password}, ensure_ascii=False).encode("utf-8")
+        if sys.platform == "win32":
+            blob = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
+            cred = _CREDENTIALW()
+            cred.Flags = 0
+            cred.Type = _CRED_TYPE_GENERIC
+            cred.TargetName = self.target
+            cred.Comment = "FJU SIS auto-relogin credentials (OS Credential Manager)"
+            cred.CredentialBlobSize = len(raw)
+            cred.CredentialBlob = ctypes.cast(blob, ctypes.POINTER(ctypes.c_ubyte))
+            cred.Persist = _CRED_PERSIST_LOCAL_MACHINE
+            cred.UserName = emp_no.strip() or "fju-sis"
+            if not _advapi32.CredWriteW(ctypes.byref(cred), 0):
+                raise OSError(f"Windows Credential Manager write failed (error {ctypes.get_last_error()})")
+            return
+        self.posix_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.posix_path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, raw)
+        finally:
+            os.close(fd)
+        os.replace(tmp, self.posix_path)
+
+    def load(self) -> tuple[str, str] | None:
+        if sys.platform == "win32":
+            ptr = ctypes.POINTER(_CREDENTIALW)()
+            if not _advapi32.CredReadW(self.target, _CRED_TYPE_GENERIC, 0, ctypes.byref(ptr)):
+                err = ctypes.get_last_error()
+                if err == 1168:
+                    return None
+                raise OSError(f"Windows Credential Manager read failed (error {err})")
+            try:
+                cred = ptr.contents
+                raw = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+            finally:
+                _advapi32.CredFree(ptr)
+            data = json.loads(raw.decode("utf-8"))
+        else:
+            if not self.posix_path.is_file():
+                return None
+            data = json.loads(self.posix_path.read_text(encoding="utf-8"))
+        emp_no = str(data.get("emp_no") or "").strip()
+        password = str(data.get("password") or "")
+        return (emp_no, password) if emp_no and password else None
+
+    def delete(self) -> bool:
+        if sys.platform == "win32":
+            if _advapi32.CredDeleteW(self.target, _CRED_TYPE_GENERIC, 0):
+                return True
+            err = ctypes.get_last_error()
+            if err == 1168:
                 return False
             raise OSError(f"Windows Credential Manager delete failed (error {err})")
         if self.posix_path.is_file():

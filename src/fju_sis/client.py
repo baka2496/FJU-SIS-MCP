@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from fju_sis.auth import Session, SessionStore, session_from_tokens
+from fju_sis.auth import CredentialStore, Session, SessionStore, session_from_tokens
 
 API_BASE = "https://travellerlink.fju.edu.tw"
 LEAVE_API_BASE = "https://explorelink.fju.edu.tw/stuLeave/api"
@@ -153,17 +153,25 @@ class SisClient:
         self,
         *,
         store: SessionStore | None = None,
+        cred_store: CredentialStore | None = None,
         base_url: str = API_BASE,
         leave_base_url: str = LEAVE_API_BASE,
         timeout: int = DEFAULT_TIMEOUT,
         transport: Transport | None = None,
     ):
         self.store = store or SessionStore()
+        self.cred_store = cred_store if cred_store is not None else CredentialStore()
         self.base_url = base_url.rstrip("/")
         self.leave_base_url = leave_base_url.rstrip("/")
         self.timeout = timeout
         self._transport = transport or default_transport
         self._session: Session | None = None
+
+    def _relogin_if_saved(self) -> Session | None:
+        saved = self.cred_store.load()
+        if not saved:
+            return None
+        return self.ldap_login(saved[0], saved[1])
 
     def ldap_login(self, emp_no: str, password: str) -> Session:
         emp_no = emp_no.strip()
@@ -219,9 +227,18 @@ class SisClient:
     def require_session(self) -> Session:
         session = self._session or self.store.load()
         if not session or not session.auth_token:
+            relogged = self._relogin_if_saved()
+            if relogged:
+                return relogged
             raise AuthError("尚未登入輔大學生資訊平台；請在終端機執行 fjusis login。")
         if session.is_expired():
-            session = self.refresh_session(session)
+            try:
+                session = self.refresh_session(session)
+            except AuthError:
+                relogged = self._relogin_if_saved()
+                if not relogged:
+                    raise
+                session = relogged
         self._session = session
         return session
 
@@ -253,10 +270,18 @@ class SisClient:
             body = b""
             headers["Content-Length"] = "0"
         resp = self._transport(method, url, headers, body, self.timeout)
-        if resp.status == 401 and session.refresh_token:
-            session = self.refresh_session(session)
-            headers["Authorization"] = f"Bearer {session.auth_token}"
-            resp = self._transport(method, url, headers, body, self.timeout)
+        if resp.status == 401:
+            refreshed: Session | None = None
+            if session.refresh_token:
+                try:
+                    refreshed = self.refresh_session(session)
+                except AuthError:
+                    refreshed = None
+            if refreshed is None:
+                refreshed = self._relogin_if_saved()
+            if refreshed is not None:
+                headers["Authorization"] = f"Bearer {refreshed.auth_token}"
+                resp = self._transport(method, url, headers, body, self.timeout)
         if resp.status == 401:
             raise AuthError("登入已失效，請在終端機執行 fjusis login 重新登入。")
         return resp
@@ -307,9 +332,15 @@ class SisClient:
 
     def keepalive(self) -> Session:
         session = self._session or self.store.load()
-        if not session or not session.auth_token:
-            raise AuthError("尚未登入輔大學生資訊平台；請在終端機執行 fjusis login。")
-        return self.refresh_session(session)
+        if session and session.auth_token:
+            try:
+                return self.refresh_session(session)
+            except AuthError:
+                pass
+        relogged = self._relogin_if_saved()
+        if relogged:
+            return relogged
+        raise AuthError("登入已過期，請在終端機執行 fjusis login 重新登入。")
 
     def get_grades(
         self,

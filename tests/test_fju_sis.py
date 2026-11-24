@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fju_sis.auth import Session, SessionStore, session_from_tokens
+from fju_sis.auth import CredentialStore, Session, SessionStore, session_from_tokens
 from fju_sis.cli import main as cli_main
 from fju_sis.client import AuthError, HttpResponse, SisClient, SisError
 from fju_sis.mcp_server import handle_message, serve_stdio
@@ -38,6 +38,23 @@ class MemoryStore(SessionStore):
     def delete(self) -> bool:
         had = self._saved is not None
         self._saved = None
+        return had
+
+
+class MemoryCredStore(CredentialStore):
+    def __init__(self, creds: tuple[str, str] | None = None):
+        super().__init__(target="FJU-SIS-MCP/test-cred-memory")
+        self._creds = creds
+
+    def save(self, emp_no: str, password: str) -> None:
+        self._creds = (emp_no, password)
+
+    def load(self) -> tuple[str, str] | None:
+        return self._creds
+
+    def delete(self) -> bool:
+        had = self._creds is not None
+        self._creds = None
         return had
 
 
@@ -177,9 +194,30 @@ class ClientTests(unittest.TestCase):
                 client.download_transcript(114, 2, tmp)
 
     def test_missing_session_raises_auth_error(self):
-        client = SisClient(store=MemoryStore())
+        client = SisClient(store=MemoryStore(), cred_store=MemoryCredStore())
         with self.assertRaises(AuthError):
             client.get_grades()
+
+    def test_expired_session_and_failed_refresh_automatically_relogins_from_cred_store(self):
+        expired_tok = make_jwt({"exp": int(time.time()) - 100})
+        fresh_tok = make_jwt({"exp": int(time.time()) + 1200})
+        store = MemoryStore(Session(emp_no="411000001", auth_token=expired_tok, refresh_token="dead-ref", exp=int(time.time()) - 100))
+        cred_store = MemoryCredStore(("411000001", "saved-pw"))
+
+        def transport(method, url, headers, body, timeout):
+            if "/RefreshToken" in url:
+                return HttpResponse(400, {}, b'{"errorMessage":["invalid refresh token"]}')
+            if "/LdapLogin" in url:
+                return HttpResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps({"statusCode": 200, "result": {"auth_token": fresh_tok, "refresh_token": "new-ref"}}).encode(),
+                )
+            return HttpResponse(200, {"content-type": "application/json"}, b'{"statusCode":200,"result":[]}')
+
+        client = SisClient(store=store, cred_store=cred_store, transport=transport)
+        self.assertEqual(client.get_semester_ranks(), [])
+        self.assertEqual(store.load().auth_token, fresh_tok)
 
 
 class CliAndMcpTests(unittest.TestCase):

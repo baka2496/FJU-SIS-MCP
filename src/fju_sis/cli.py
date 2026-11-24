@@ -38,13 +38,20 @@ def cmd_login(args: argparse.Namespace, client: SisClient) -> int:
     emp_no = (args.emp_no or input("學號（LDAP 帳號）: ")).strip()
     password = getpass.getpass("LDAP 密碼（不顯示）: ")
     session = client.ldap_login(emp_no, password)
-    print(f"登入成功！已將權杖存入系統認證管理員（不保存密碼）。學號：{session.emp_no}，到期：{_fmt_exp(session.exp)}")
+    remember = not args.no_remember
+    if remember:
+        client.cred_store.save(emp_no, password)
+        print(f"登入成功！已將權杖與自動重登憑證加密存入系統認證管理員（不寫入設定檔）。學號：{session.emp_no}，到期：{_fmt_exp(session.exp)}")
+    else:
+        client.cred_store.delete()
+        print(f"登入成功！已將權杖存入系統認證管理員（不保存密碼）。學號：{session.emp_no}，到期：{_fmt_exp(session.exp)}")
     return 0
 
 
 def cmd_logout(args: argparse.Namespace, client: SisClient) -> int:
-    removed = client.store.delete()
-    print("已清除本機登入狀態。" if removed else "本機原本就沒有登入狀態。")
+    removed_s = client.store.delete()
+    removed_c = client.cred_store.delete()
+    print("已清除本機登入權杖與自動重登憑證。" if (removed_s or removed_c) else "本機原本就沒有登入狀態。")
     return 0
 
 
@@ -282,9 +289,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_login = sub.add_parser("login", help="登入並將權杖存入系統認證管理員（不存密碼）")
+    p_login = sub.add_parser("login", help="登入並存入系統認證管理員（預設開啟過期自動重登）")
     p_login.add_argument("--emp-no", help="學號（不填則互動輸入）")
     p_login.add_argument("--token", action="store_true", help="改用貼上 auth_token / refresh_token 方式登入")
+    p_login.add_argument("--no-remember", action="store_true", help="只存 20 分鐘權杖，不在系統認證管理員保存自動重登憑證")
 
     sub.add_parser("logout", help="清除本機系統認證管理員內的登入狀態")
 
