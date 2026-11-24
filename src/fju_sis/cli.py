@@ -124,12 +124,13 @@ def cmd_transcript(args: argparse.Namespace, client: SisClient) -> int:
         return 0
     out_dir = Path(args.out).resolve()
     ranking = not args.no_ranking
+    refresh = bool(getattr(args, "refresh", False))
     if args.all:
-        files = client.download_all_transcripts(out_dir, ranking=ranking)
+        files = client.download_all_transcripts(out_dir, ranking=ranking, refresh=refresh)
     else:
         if args.hy is None or args.ht is None:
             raise SisError("請指定 --all 下載全部學期，或同時指定 --hy <學年> 與 --ht <學期>。")
-        files = [client.download_transcript(args.hy, args.ht, out_dir, ranking=ranking)]
+        files = [client.download_transcript(args.hy, args.ht, out_dir, ranking=ranking, refresh=refresh)]
     if args.json:
         _print_json({"files": files})
         return 0
@@ -320,6 +321,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr_dl.add_argument("--hy", type=int, help="指定學年度（例如 114）")
     p_tr_dl.add_argument("--ht", type=int, help="指定學期（例如 1 或 2）")
     p_tr_dl.add_argument("--no-ranking", action="store_true", help="下載不含排名版本（預設含排名）")
+    p_tr_dl.add_argument("--refresh", action="store_true", help="忽略本機快取，強制向學校重新下載")
     p_tr_dl.add_argument("--out", default=".", help="輸出資料夾（預設目前目錄）")
     p_tr_dl.add_argument("--json", action="store_true")
 

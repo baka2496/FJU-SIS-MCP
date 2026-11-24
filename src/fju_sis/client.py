@@ -1,6 +1,7 @@
 """HTTP client for FJU Student Information Platform APIs (travellerlink & explorelink)."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 import json
@@ -378,7 +379,20 @@ class SisClient:
         *,
         ranking: bool = True,
         lcid: int = DEFAULT_LCID,
+        refresh: bool = False,
     ) -> dict[str, Any]:
+        suffix = "含排名" if ranking else "不含排名"
+        dest = Path(out_dir).resolve() / f"{hy}-{ht}_學期數位成績單_{suffix}.pdf"
+        if not refresh and dest.is_file() and dest.stat().st_size > 100 and dest.read_bytes()[:5] == b"%PDF-":
+            return {
+                "hy": int(hy) if str(hy).isdigit() else str(hy),
+                "ht": int(ht) if str(ht).isdigit() else str(ht),
+                "ranking": ranking,
+                "path": str(dest),
+                "size": dest.stat().st_size,
+                "cached": True,
+                "original_filename": dest.name,
+            }
         session = self.require_session()
         resp = self._authed_request(
             "GET",
@@ -401,8 +415,6 @@ class SisClient:
             raise SisError(detail or f"下載 {hy}-{ht} 數位成績單失敗（HTTP {resp.status}）")
         if not resp.body.startswith(b"%PDF-"):
             raise SisError(f"{hy}-{ht} 下載回應不是有效的 PDF 檔案（Content-Type: {resp.headers.get('content-type', 'unknown')}）")
-        suffix = "含排名" if ranking else "不含排名"
-        dest = Path(out_dir).resolve() / f"{hy}-{ht}_學期數位成績單_{suffix}.pdf"
         _write_pdf(dest, resp.body)
         return {
             "hy": int(hy) if str(hy).isdigit() else str(hy),
@@ -410,6 +422,7 @@ class SisClient:
             "ranking": ranking,
             "path": str(dest),
             "size": len(resp.body),
+            "cached": False,
             "original_filename": _parse_disposition_filename(resp.headers.get("content-disposition", "")),
         }
 
@@ -419,9 +432,10 @@ class SisClient:
         *,
         ranking: bool = True,
         lcid: int = DEFAULT_LCID,
+        refresh: bool = False,
     ) -> list[dict[str, Any]]:
         records = self.list_transcripts(lcid=lcid)
-        downloaded: list[dict[str, Any]] = []
+        targets: list[tuple[Any, Any]] = []
         seen: set[tuple[str, str]] = set()
         for rec in records:
             hy = rec.get("hy")
@@ -432,8 +446,12 @@ class SisClient:
             if key in seen:
                 continue
             seen.add(key)
-            downloaded.append(self.download_transcript(hy, ht, out_dir, ranking=ranking, lcid=lcid))
-        return downloaded
+            targets.append((hy, ht))
+        if len(targets) <= 1:
+            return [self.download_transcript(hy, ht, out_dir, ranking=ranking, lcid=lcid, refresh=refresh) for hy, ht in targets]
+        with ThreadPoolExecutor(max_workers=min(4, len(targets))) as pool:
+            futs = [pool.submit(self.download_transcript, hy, ht, out_dir, ranking=ranking, lcid=lcid, refresh=refresh) for hy, ht in targets]
+            return [f.result() for f in futs]
 
     # --- Digital Enrollment Certificate ---
 

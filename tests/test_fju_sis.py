@@ -180,6 +180,11 @@ class ClientTests(unittest.TestCase):
                 self.assertTrue(p.read_bytes().startswith(b"%PDF-"))
                 self.assertNotIn("1.2.3.4", p.name)
                 self.assertIn("含排名", p.name)
+            # Second call with refresh=False reuses local cached PDFs without re-downloading
+            p0 = Path(files[0]["path"])
+            p0.write_bytes(b"%PDF-1.7\n" + b"0" * 120)
+            cached = client.download_transcript(114, 1, tmp, ranking=True, refresh=False)
+            self.assertTrue(cached["cached"])
 
     def test_download_rejects_non_pdf_payload(self):
         tok = make_jwt({"exp": int(time.time()) + 3600})
